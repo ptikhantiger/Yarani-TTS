@@ -88,7 +88,7 @@ Push the repo to GitHub first. Then:
 
 **1. Backend** - pick one:
 
-- **Vercel** (recommended: no card, ~2 s cold starts): Add New Project -> import the same repo again -> **Root Directory: `backend`** -> Framework Preset: *Other* -> add env var `ALLOWED_ORIGINS=http://localhost:3000` -> Deploy. `backend/vercel.json` routes every path to the FastAPI app as a Python function with a 300 s limit. URL: `https://<project>.vercel.app`.
+- **Vercel** (recommended: no card, ~2 s cold starts): Add New Project -> import the same repo again -> **Root Directory: `backend`** -> Framework Preset: *Other* -> add env var `ALLOWED_ORIGINS=http://localhost:3000` -> Deploy. Vercel auto-detects `main.py` -> `app` (zero-config FastAPI); `backend/vercel.json` only raises the function limit to 300 s. URL: `https://<project>.vercel.app`.
 - **Render** (Python web service, sleeps after 15 min idle, may require a card on file): New -> Web Service -> Language *Python 3*, Root Directory `backend`, build `pip install -r requirements.txt`, start `uvicorn main:app --host 0.0.0.0 --port $PORT`, env `PYTHON_VERSION=3.12.7`, `ALLOWED_ORIGINS`.
 - **Hugging Face Spaces** (Docker, no card, sleeps after 48 h idle - ping `/health` from a free cron service to keep it awake): New Space -> SDK *Docker* -> upload `backend/main.py`, `requirements.txt`, `Dockerfile`, `.dockerignore`. Add `ALLOWED_ORIGINS` under Settings -> Variables. URL: `https://<user>-<space>.hf.space`.
 
