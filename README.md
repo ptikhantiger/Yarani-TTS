@@ -87,10 +87,11 @@ The proxy sets `maxDuration = 300`, which is enough on Vercel Pro and on Hobby w
 
 Push the repo to GitHub first. Then:
 
-**1. Backend** — pick one:
+**1. Backend** - pick one:
 
-- **Render** (Python web service, sleeps after 15 min idle): New → Blueprint → select the repo. `render.yaml` sets everything; fill in `ALLOWED_ORIGINS` when prompted (you can update it after the Vercel URL exists). Copy the service URL, e.g. `https://yarani-tts.onrender.com`.
-- **Hugging Face Spaces** (Docker, sleeps after 48 h idle): New Space → SDK *Docker* → push only the `backend/` folder to the Space repo (`git subtree push --prefix backend <space-remote> main`). Add `ALLOWED_ORIGINS` under Settings → Variables. URL is `https://<user>-<space>.hf.space`.
+- **Vercel** (recommended: no card, ~2 s cold starts): Add New Project -> import the same repo again -> **Root Directory: `backend`** -> Framework Preset: *Other* -> add env var `ALLOWED_ORIGINS=http://localhost:3000` -> Deploy. `backend/vercel.json` routes every path to the FastAPI app as a Python function with a 300 s limit. URL: `https://<project>.vercel.app`.
+- **Render** (Python web service, sleeps after 15 min idle, may require a card on file): New -> Web Service -> Language *Python 3*, Root Directory `backend`, build `pip install -r requirements.txt`, start `uvicorn main:app --host 0.0.0.0 --port $PORT`, env `PYTHON_VERSION=3.12.7`, `ALLOWED_ORIGINS`.
+- **Hugging Face Spaces** (Docker, no card, sleeps after 48 h idle - ping `/health` from a free cron service to keep it awake): New Space -> SDK *Docker* -> upload `backend/main.py`, `requirements.txt`, `Dockerfile`, `.dockerignore`. Add `ALLOWED_ORIGINS` under Settings -> Variables. URL: `https://<user>-<space>.hf.space`.
 
 Check `https://<backend>/health` returns `{"status":"ok"}`.
 
