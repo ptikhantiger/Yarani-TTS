@@ -14,7 +14,7 @@ A minimal, light-mode TTS web app. Next.js 16 (App Router, Tailwind v4, shadcn/u
 │   │   ├── globals.css            Zinc palette tokens, no dark mode
 │   │   └── api/generate-tts/route.ts   Streaming proxy → Python service
 │   ├── src/components/
-│   │   ├── navbar.tsx             Sticky logo + GitHub link
+│   │   ├── navbar.tsx             Sticky logo
 │   │   ├── tts-converter.tsx      Textarea, grouped voice select, progress, cancel
 │   │   ├── audio-player.tsx       <audio> widget + download
 │   │   └── ui/                    shadcn primitives (button, select, textarea, label)
@@ -76,7 +76,6 @@ The proxy sets `maxDuration = 300`, which is enough on Vercel Pro and on Hobby w
 | --- | --- | --- |
 | frontend | `TTS_BACKEND_URL` | Base URL of the FastAPI service used by the proxy (`.env.example` uses `http://127.0.0.1:8010`, matching `npm run dev`) |
 | frontend | `NEXT_PUBLIC_TTS_API_URL` | Optional: call the backend directly from the browser, bypassing the proxy |
-| frontend | `NEXT_PUBLIC_GITHUB_URL` | Link in the navbar |
 | backend | `ALLOWED_ORIGINS` | Comma-separated CORS origins (default `http://localhost:3000`) |
 | backend | `TTS_MAX_CHARS` | Character limit (default `40000`) |
 | backend | `TTS_CHUNK_CHARS` / `TTS_FIRST_CHUNK_CHARS` | Chunk sizes (default `500` / `300`) |
@@ -95,7 +94,6 @@ Push the repo to GitHub first. Then:
 
 Check `https://<backend>/health` returns `{"status":"ok"}`.
 
-**2. Frontend on Vercel**: Add New Project → import the repo → **Root Directory: `frontend`** → Environment Variables: `TTS_BACKEND_URL=https://<backend>` and `NEXT_PUBLIC_GITHUB_URL=<repo url>` → Deploy.
 
 **3. Lock CORS**: set the backend's `ALLOWED_ORIGINS` to your Vercel URL (`https://<project>.vercel.app`), comma-separate any custom domain. Only needed if you also set `NEXT_PUBLIC_TTS_API_URL`; the proxy path is server-to-server and needs no CORS.
 
