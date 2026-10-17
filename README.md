@@ -80,7 +80,9 @@ The proxy sets `maxDuration = 300`, which is enough on Vercel Pro and on Hobby w
 | backend | `TTS_MAX_CHARS` | Character limit (default `40000`) |
 | backend | `TTS_CHUNK_CHARS` / `TTS_FIRST_CHUNK_CHARS` | Chunk sizes (default `500` / `300`) |
 | backend | `TTS_CONCURRENCY` / `TTS_GLOBAL_CONCURRENCY` | Parallel chunks per request / across all requests (default `10` / `24`) |
-| backend | `TTS_CHUNK_RETRIES` | Retries per chunk before failing (default `3`) |
+| backend | `TTS_CHUNK_RETRIES` | Per-chunk attempts before the chunk is given up (default `3`) |
+| backend | `TTS_STREAM_RETRIES` | Whole-stream attempts before the request fails with a `502` (default `2`) |
+| backend | `TTS_CHUNK_TIMEOUT` | Seconds before one synthesis attempt is abandoned and retried (default `40`) |
 
 ## Deploy (free)
 

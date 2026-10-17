@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import time
 from collections.abc import AsyncIterator
@@ -56,7 +57,22 @@ CHUNK_CHARS = _env_int("TTS_CHUNK_CHARS", 500)            # target size per chun
 FIRST_CHUNK_CHARS = _env_int("TTS_FIRST_CHUNK_CHARS", 300)  # small → fast first byte
 CONCURRENCY = _env_int("TTS_CONCURRENCY", 10)             # per request
 GLOBAL_CONCURRENCY = _env_int("TTS_GLOBAL_CONCURRENCY", 24)  # across all requests
-CHUNK_RETRIES = _env_int("TTS_CHUNK_RETRIES", 3)
+CHUNK_RETRIES = max(1, _env_int("TTS_CHUNK_RETRIES", 3))
+
+# Edge answers a <=500-char chunk in a couple of seconds, but a websocket can
+# occasionally stall indefinitely. This ceiling turns such a stall into a
+# retryable failure instead of a request that hangs until the caller gives up.
+CHUNK_TIMEOUT_SECONDS = max(1, _env_int("TTS_CHUNK_TIMEOUT", 40))
+
+# Whole-stream restart attempts. The first chunk gates the entire response
+# (headers are not sent until it arrives), so a transient failure there is
+# retried with a fresh set of connections before we give up with a 502.
+STREAM_RETRIES = max(1, _env_int("TTS_STREAM_RETRIES", 2))
+
+# Retry backoff: min(cap, base * 2 ** (attempt - 1)), scaled by 0.5-1.5x jitter
+# so concurrent chunks don't retry in lockstep and pile back onto the service.
+BACKOFF_BASE_SECONDS = 0.5
+BACKOFF_MAX_SECONDS = 8.0
 
 # Comma-separated list of browser origins allowed to call this service
 # directly. Needed when the frontend bypasses its own proxy (long-form mode).
@@ -142,8 +158,9 @@ _global_sem = asyncio.Semaphore(GLOBAL_CONCURRENCY)
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     log.info(
-        "starting: max %d chars, chunk %d, concurrency %d/%d, origins=%s",
-        MAX_CHARS, CHUNK_CHARS, CONCURRENCY, GLOBAL_CONCURRENCY, ALLOWED_ORIGINS,
+        "starting: max %d chars, chunk %d, concurrency %d/%d, retries %d/%d, timeout %ds, origins=%s",
+        MAX_CHARS, CHUNK_CHARS, CONCURRENCY, GLOBAL_CONCURRENCY,
+        CHUNK_RETRIES, STREAM_RETRIES, CHUNK_TIMEOUT_SECONDS, ALLOWED_ORIGINS,
     )
     # Warm the catalogue so the first request doesn't pay for it. Failure is
     # non-fatal: validation falls back to the ShortName pattern.
@@ -263,6 +280,12 @@ def split_text(text: str, chunk_chars: int = CHUNK_CHARS, first_chunk_chars: int
 _END = object()  # sentinel marking the end of a chunk's byte stream
 
 
+def _backoff(attempt: int) -> float:
+    """Exponential backoff with jitter, so retries don't stampede the service."""
+    delay = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
+    return delay * (0.5 + random.random())
+
+
 async def _synthesize_chunk(
     index: int,
     text: str,
@@ -272,30 +295,40 @@ async def _synthesize_chunk(
 ) -> None:
     """
     Stream one chunk's MP3 bytes into `queue`, ending with `_END` (or an
-    exception object on failure). Retries only if nothing has been emitted
-    yet: once bytes are out we cannot take them back without duplicating audio.
+    exception object on failure). Each attempt is bounded by CHUNK_TIMEOUT_SECONDS
+    so a stalled connection retries instead of hanging. Retries only if nothing
+    has been emitted yet: once bytes are out we cannot take them back without
+    duplicating audio.
     """
     async with request_sem, _global_sem:
         for attempt in range(1, CHUNK_RETRIES + 1):
             emitted = False
             try:
-                async for chunk in edge_tts.Communicate(text, voice).stream():
-                    if chunk["type"] == "audio" and chunk["data"]:
-                        emitted = True
-                        await queue.put(chunk["data"])
-                if not emitted:
-                    raise NoAudioReceived("No audio was received from the service.")
+                async with asyncio.timeout(CHUNK_TIMEOUT_SECONDS):
+                    async for chunk in edge_tts.Communicate(text, voice).stream():
+                        if chunk["type"] == "audio" and chunk["data"]:
+                            emitted = True
+                            await queue.put(chunk["data"])
+                    if not emitted:
+                        raise NoAudioReceived("No audio was received from the service.")
                 await queue.put(_END)
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 if emitted or attempt == CHUNK_RETRIES:
-                    log.exception("chunk %d failed (attempt %d, emitted=%s)", index, attempt, emitted)
+                    log.exception(
+                        "chunk %d failed (attempt %d/%d, emitted=%s)",
+                        index, attempt, CHUNK_RETRIES, emitted,
+                    )
                     await queue.put(exc)
                     return
-                log.warning("chunk %d attempt %d failed: %s; retrying", index, attempt, exc)
-                await asyncio.sleep(0.5 * attempt)
+                delay = _backoff(attempt)
+                log.warning(
+                    "chunk %d attempt %d/%d failed: %s; retrying in %.1fs",
+                    index, attempt, CHUNK_RETRIES, exc, delay,
+                )
+                await asyncio.sleep(delay)
 
 
 async def _audio_stream(chunks: list[str], voice: str) -> AsyncIterator[bytes]:
@@ -356,6 +389,47 @@ async def limits() -> dict[str, int]:
     return {"max_chars": MAX_CHARS, "chunk_chars": CHUNK_CHARS, "concurrency": CONCURRENCY}
 
 
+async def _open_stream(chunks: list[str], voice: str) -> tuple[bytes, AsyncIterator[bytes]]:
+    """
+    Start the chunk stream and pull its first bytes.
+
+    Nothing has been sent to the client at this point, so a failure while
+    producing the very first chunk is safe to retry with a fresh set of
+    connections. That matters because this one chunk gates the entire response:
+    without a retry here, a single transient upstream hiccup turns the whole
+    request into a 502.
+    """
+    for attempt in range(1, STREAM_RETRIES + 1):
+        stream = _audio_stream(chunks, voice)
+        final = attempt == STREAM_RETRIES
+        try:
+            return await anext(stream), stream
+        except NoAudioReceived as exc:
+            await stream.aclose()
+            if final:
+                log.warning("edge-tts produced no audio for voice=%s", voice)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="The voice service produced no audio for this input.",
+                ) from exc
+            log.warning("no audio for voice=%s (attempt %d/%d); retrying", voice, attempt, STREAM_RETRIES)
+        except Exception as exc:  # noqa: BLE001
+            await stream.aclose()
+            if final:
+                log.exception("edge-tts failed for voice=%s", voice)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="The voice service is unavailable right now. Please try again.",
+                ) from exc
+            log.warning(
+                "stream bootstrap failed for voice=%s (attempt %d/%d): %s; retrying",
+                voice, attempt, STREAM_RETRIES, exc,
+            )
+        await asyncio.sleep(_backoff(attempt))
+
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 @app.post(
     "/api/generate-tts",
     response_class=StreamingResponse,
@@ -374,22 +448,7 @@ async def generate_tts(payload: GenerateRequest) -> StreamingResponse:
     chunks = split_text(payload.text)
     log.info("generate: voice=%s chars=%d chunks=%d", payload.voice, len(payload.text), len(chunks))
 
-    stream = _audio_stream(chunks, payload.voice)
-    try:
-        first = await anext(stream)
-    except NoAudioReceived:
-        await stream.aclose()
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="The voice service produced no audio for this input.",
-        ) from None
-    except Exception as exc:  # noqa: BLE001
-        await stream.aclose()
-        log.exception("edge-tts failed for voice=%s", payload.voice)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="The voice service is unavailable right now. Please try again.",
-        ) from exc
+    first, stream = await _open_stream(chunks, payload.voice)
 
     async def body() -> AsyncIterator[bytes]:
         yield first
